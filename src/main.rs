@@ -8,6 +8,7 @@
 #![feature(pointer_methods)]
 #![feature(const_fn)]
 #![feature(nll)]
+#![feature(panic_implementation)]
 #![no_std]
 #![no_main]
 
@@ -19,10 +20,11 @@ extern crate xmas_elf;
 extern crate fixedvec;
 
 use core::slice;
+use core::panic::PanicInfo;
 use os_bootinfo::BootInfo;
 use usize_conversions::usize_from;
 use x86_64::structures::paging::{Mapper, RecursivePageTable};
-use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size2MB};
+use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size2MiB, Size4KiB};
 use x86_64::ux::u9;
 pub use x86_64::PhysAddr;
 use x86_64::VirtAddr;
@@ -67,6 +69,7 @@ pub extern "C" fn load_elf(
     page_table_end: PhysAddr,
     bootloader_start: PhysAddr,
     bootloader_end: PhysAddr,
+    package_size: u64,
 ) -> ! {
     use fixedvec::FixedVec;
     use os_bootinfo::{MemoryRegion, MemoryRegionType};
@@ -118,6 +121,10 @@ pub extern "C" fn load_elf(
         memory_map: &mut memory_map,
     };
 
+    let package_start = {
+        let padding = (512 - (kernel_size % 512)) % 512;
+        IdentityMappedAddr(PhysAddr::new(kernel_start.as_u64() + kernel_size + padding))
+    };
 
     // Mark already used memory areas in frame allocator.
     {
@@ -142,6 +149,15 @@ pub extern "C" fn load_elf(
             range: kernel_memory_area.into(),
             region_type: MemoryRegionType::Kernel,
         });
+
+        let package_start_frame = PhysFrame::containing_address(package_start.phys()) + 1;
+        let package_end_frame = PhysFrame::containing_address(package_start.phys() + package_size - 1u64);
+        let package_memory_area = PhysFrame::range(package_start_frame, package_end_frame + 1);
+        frame_allocator.mark_allocated_region(MemoryRegion {
+            range: package_memory_area.into(),
+            region_type: MemoryRegionType::Package,
+        });
+
         let page_table_start_frame = PhysFrame::containing_address(page_table_start);
         let page_table_end_frame = PhysFrame::containing_address(page_table_end - 1u64);
         let page_table_memory_area =
@@ -154,13 +170,13 @@ pub extern "C" fn load_elf(
 
 
     // Unmap the ELF file.
-    let kernel_start_page: Page<Size2MB> = Page::containing_address(kernel_start.virt());
-    let kernel_end_page: Page<Size2MB> =
+    let kernel_start_page: Page<Size2MiB> = Page::containing_address(kernel_start.virt());
+    let kernel_end_page: Page<Size2MiB> =
         Page::containing_address(kernel_start.virt() + kernel_size - 1u64);
     for page in Page::range_inclusive(kernel_start_page, kernel_end_page) {
         rec_page_table
-            .unmap(page, &mut |_| {})
-            .expect("dealloc error").flush();
+            .unmap(page)
+            .expect("dealloc error").1.flush();
     }
 
     // Map kernel segments.
@@ -170,6 +186,22 @@ pub extern "C" fn load_elf(
         &mut rec_page_table,
         &mut frame_allocator,
     ).expect("kernel mapping failed");
+
+    let package_start_page: Page<Size4KiB> = Page::containing_address(package_start.virt());
+    let package_end_page = Page::containing_address(package_start.virt() + package_size - 1u64);
+
+    let package_start_frame = PhysFrame::containing_address(package_start.phys());
+    let package_end_frame = PhysFrame::containing_address(package_start.phys() + package_size - 1u64);
+
+    let page_iter = Page::range_inclusive(package_start_page, package_end_page);
+    let frame_iter = PhysFrame::range_inclusive(package_start_frame, package_end_frame);
+
+    for (frame, page) in frame_iter.zip(page_iter) {
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        page_table::map_page(page, frame, flags, &mut rec_page_table, &mut frame_allocator)
+            .expect("Unable to map page")
+            .flush();
+    }
 
     // Map a page for the boot info structure
     let boot_info_page = {
@@ -188,8 +220,10 @@ pub extern "C" fn load_elf(
         page
     };
 
+    let package_slice = unsafe { slice::from_raw_parts(package_start.as_u64() as *const u8, package_size as usize) };
+
     // Construct boot info structure.
-    let mut boot_info = BootInfo::new(recursive_page_table_addr.start_address().as_u64(), memory_map);
+    let mut boot_info = BootInfo::new(recursive_page_table_addr.start_address().as_u64(), memory_map, package_slice);
     boot_info.memory_map.sort();
 
     // Write boot info to boot info page.
@@ -214,16 +248,12 @@ fn enable_write_protect_bit() {
     unsafe { Cr0::update(|cr0| *cr0 |= Cr0Flags::WRITE_PROTECT) };
 }
 
-#[lang = "panic_fmt"]
+#[panic_implementation]
 #[no_mangle]
-pub extern "C" fn rust_begin_panic(
-    msg: core::fmt::Arguments,
-    file: &'static str,
-    line: u32,
-    _column: u32,
-) -> ! {
+pub extern "C" fn panic(info: &PanicInfo) -> ! {
     use core::fmt::Write;
-    write!(printer::Printer, "PANIC: {} in {}:{}", msg, file, line).unwrap();
+
+    let _ = write!(printer::Printer, "{}", info);
 
     loop {}
 }

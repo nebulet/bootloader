@@ -43,7 +43,9 @@ SECTIONS {
 
     _kernel_info_block_start = .;
     _kib_kernel_size = .;
-    . += 512; /* kernel info block */
+    . += 8;
+    _kib_package_size = .;
+    . += 512 - 8; /* kernel info block */
     _kernel_info_block_end = .;
 
     __bootloader_end = .;
