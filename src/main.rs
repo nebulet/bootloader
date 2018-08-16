@@ -1,13 +1,10 @@
 #![feature(lang_items)]
 #![feature(global_asm)]
-#![feature(iterator_step_by)]
 #![feature(try_from)]
 #![feature(step_trait)]
 #![feature(asm)]
 #![feature(nll)]
-#![feature(pointer_methods)]
 #![feature(const_fn)]
-#![feature(nll)]
 #![feature(panic_implementation)]
 #![no_std]
 #![no_main]
@@ -174,9 +171,7 @@ pub extern "C" fn load_elf(
     let kernel_end_page: Page<Size2MiB> =
         Page::containing_address(kernel_start.virt() + kernel_size - 1u64);
     for page in Page::range_inclusive(kernel_start_page, kernel_end_page) {
-        rec_page_table
-            .unmap(page)
-            .expect("dealloc error").1.flush();
+        rec_page_table.unmap(page).expect("dealloc error").1.flush();
     }
 
     // Map kernel segments.
@@ -252,9 +247,7 @@ fn enable_write_protect_bit() {
 #[no_mangle]
 pub extern "C" fn panic(info: &PanicInfo) -> ! {
     use core::fmt::Write;
-
-    let _ = write!(printer::Printer, "{}", info);
-
+    write!(printer::Printer, "{}", info).unwrap();
     loop {}
 }
 

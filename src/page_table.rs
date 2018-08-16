@@ -1,7 +1,7 @@
 use fixedvec::FixedVec;
 use frame_allocator::FrameAllocator;
 use os_bootinfo::MemoryRegionType;
-use x86_64::structures::paging::{MapToError, RecursivePageTable, UnmapError};
+use x86_64::structures::paging::{self, MapToError, RecursivePageTable, UnmapError};
 use x86_64::structures::paging::{Mapper, MapperFlush, Page, PageSize, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{align_up, PhysAddr, VirtAddr};
 use xmas_elf::program::{self, ProgramHeader64};
@@ -158,5 +158,13 @@ where
     S: PageSize,
     RecursivePageTable<'a>: Mapper<S>,
 {
-    page_table.map_to(page, phys_frame, flags, frame_allocator)
+    struct PageTableAllocator<'a, 'b: 'a>(&'a mut FrameAllocator<'b>);
+
+    impl<'a, 'b> paging::FrameAllocator<Size4KiB> for PageTableAllocator<'a, 'b> {
+        fn alloc(&mut self) -> Option<PhysFrame<Size4KiB>> {
+            self.0.allocate_frame(MemoryRegionType::PageTable)
+        }
+    }
+
+    page_table.map_to(page, phys_frame, flags, &mut PageTableAllocator(frame_allocator))
 }
