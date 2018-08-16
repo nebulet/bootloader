@@ -107,7 +107,7 @@ pub(crate) fn map_segment(
                         return Err(match e {
                             UnmapError::ParentEntryHugePage => {
                                 MapToError::ParentEntryHugePage
-                            }
+                            },
                             UnmapError::PageNotMapped => unreachable!(),
                             UnmapError::InvalidFrameAddress(_) => unreachable!(),
                         });

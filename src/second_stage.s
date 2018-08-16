@@ -37,13 +37,19 @@ load_kernel_from_disk:
     shr eax, 9 # divide by 512 (block size)
     mov [dap_start_lba], eax
 
-    # destination address
-    mov edi, 0x400000
-
     # block count
     mov ecx, _kib_kernel_size
     add ecx, 511 # align up
     shr ecx, 9
+
+    mov edi, _kib_package_size
+    add edi, 511 # align up
+    shr edi, 9
+    add ecx, edi
+
+    # destination address
+    mov edi, 0x400000
+
 
 load_next_kernel_block_from_disk:
     # load block from disk
@@ -260,6 +266,8 @@ long_mode:
     movzx rcx, word ptr mmap_ent
     lea r8, __page_table_start
     lea r9, __page_table_end
+    mov rax, _kib_package_size
+    push rax
     lea rax, __bootloader_end
     push rax
     lea rax, __bootloader_start

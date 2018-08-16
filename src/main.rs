@@ -21,7 +21,7 @@ use core::panic::PanicInfo;
 use os_bootinfo::BootInfo;
 use usize_conversions::usize_from;
 use x86_64::structures::paging::{Mapper, RecursivePageTable};
-use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size2MiB};
+use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size2MiB, Size4KiB};
 use x86_64::ux::u9;
 pub use x86_64::PhysAddr;
 use x86_64::VirtAddr;
@@ -66,6 +66,7 @@ pub extern "C" fn load_elf(
     page_table_end: PhysAddr,
     bootloader_start: PhysAddr,
     bootloader_end: PhysAddr,
+    package_size: u64,
 ) -> ! {
     use fixedvec::FixedVec;
     use os_bootinfo::{MemoryRegion, MemoryRegionType};
@@ -117,6 +118,10 @@ pub extern "C" fn load_elf(
         memory_map: &mut memory_map,
     };
 
+    let package_start = {
+        let padding = (512 - (kernel_size % 512)) % 512;
+        IdentityMappedAddr(PhysAddr::new(kernel_start.as_u64() + kernel_size + padding))
+    };
 
     // Mark already used memory areas in frame allocator.
     {
@@ -141,6 +146,15 @@ pub extern "C" fn load_elf(
             range: kernel_memory_area.into(),
             region_type: MemoryRegionType::Kernel,
         });
+
+        let package_start_frame = PhysFrame::containing_address(package_start.phys()) + 1;
+        let package_end_frame = PhysFrame::containing_address(package_start.phys() + package_size - 1u64);
+        let package_memory_area = PhysFrame::range(package_start_frame, package_end_frame + 1);
+        frame_allocator.mark_allocated_region(MemoryRegion {
+            range: package_memory_area.into(),
+            region_type: MemoryRegionType::Package,
+        });
+
         let page_table_start_frame = PhysFrame::containing_address(page_table_start);
         let page_table_end_frame = PhysFrame::containing_address(page_table_end - 1u64);
         let page_table_memory_area =
@@ -168,6 +182,22 @@ pub extern "C" fn load_elf(
         &mut frame_allocator,
     ).expect("kernel mapping failed");
 
+    let package_start_page: Page<Size4KiB> = Page::containing_address(package_start.virt());
+    let package_end_page = Page::containing_address(package_start.virt() + package_size - 1u64);
+
+    let package_start_frame = PhysFrame::containing_address(package_start.phys());
+    let package_end_frame = PhysFrame::containing_address(package_start.phys() + package_size - 1u64);
+
+    let page_iter = Page::range_inclusive(package_start_page, package_end_page);
+    let frame_iter = PhysFrame::range_inclusive(package_start_frame, package_end_frame);
+
+    for (frame, page) in frame_iter.zip(page_iter) {
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        page_table::map_page(page, frame, flags, &mut rec_page_table, &mut frame_allocator)
+            .expect("Unable to map page")
+            .flush();
+    }
+
     // Map a page for the boot info structure
     let boot_info_page = {
         let page: Page = Page::containing_address(VirtAddr::new(0xb0071f0000));
@@ -185,8 +215,10 @@ pub extern "C" fn load_elf(
         page
     };
 
+    let package_slice = unsafe { slice::from_raw_parts(package_start.as_u64() as *const u8, package_size as usize) };
+
     // Construct boot info structure.
-    let mut boot_info = BootInfo::new(recursive_page_table_addr.start_address().as_u64(), memory_map);
+    let mut boot_info = BootInfo::new(recursive_page_table_addr.start_address().as_u64(), memory_map, package_slice);
     boot_info.memory_map.sort();
 
     // Write boot info to boot info page.
